@@ -12,7 +12,7 @@ fi
 
 # 2. Create a fresh virtual environment
 echo "Creating virtual environment with Python 3.11..."
-uv venv --python 3.11
+uv venv --python 3.11.10
 
 # 3. Use the environment
 # Note: In a script, we use 'source' or just call uv run
