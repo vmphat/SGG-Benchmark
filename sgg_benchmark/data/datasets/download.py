@@ -22,6 +22,7 @@ The reconstructed directory layout per split is::
 """
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 
@@ -117,15 +118,50 @@ def _build_coco_json(split_ds, categories: list, rel_categories: list) -> dict:
 
 def _save_images(split_ds, split_dir: Path) -> None:
     """Save PIL images from the HF dataset to *split_dir*."""
+    from PIL import Image
+
     split_dir.mkdir(parents=True, exist_ok=True)
     total = len(split_ds)
     for i, row in enumerate(split_ds, 1):
         dst = split_dir / row["file_name"]
         if not dst.exists():
-            row["image"].save(dst)
+            img = row["image"]
+            if isinstance(img, Image.Image):
+                img.save(dst)
+            elif isinstance(img, dict) and "bytes" in img:
+                Image.open(io.BytesIO(img["bytes"])).save(dst)
         if i % 500 == 0 or i == total:
             print(f"    saved {i}/{total} images …", end="\r")
     print()
+
+
+def _load_from_hub(hub_repo: str, splits: tuple) -> dict:
+    """Load dataset from HF Hub, with fallback for datasets library incompatibility."""
+    try:
+        from datasets import load_dataset
+        return load_dataset(hub_repo)
+    except TypeError:
+        pass
+
+    print("  [INFO] Falling back to direct parquet download (datasets version issue) …")
+    from huggingface_hub import snapshot_download
+    import pyarrow.parquet as pq
+    from datasets import Dataset
+
+    repo_path = Path(snapshot_download(hub_repo, repo_type="dataset"))
+
+    dataset_dict = {}
+    for split in splits:
+        parquet_files = sorted(repo_path.glob(f"data/{split}-*.parquet"))
+        if not parquet_files:
+            parquet_files = sorted(repo_path.glob(f"{split}/*.parquet"))
+        if not parquet_files:
+            continue
+        table = pq.concat_tables([pq.read_table(f) for f in parquet_files])
+        table = table.replace_schema_metadata(None)
+        dataset_dict[split] = Dataset(table)
+
+    return dataset_dict
 
 
 # ---------------------------------------------------------------------------
@@ -151,8 +187,6 @@ def download_dataset(
         When ``True``, images are also downloaded and saved alongside the
         annotation JSON files.  This can require tens of GB of disk space.
     """
-    from datasets import load_dataset  # heavy import — deferred on purpose
-
     if dataset_name not in DATASET_CONFIGS:
         raise ValueError(
             f"Unknown dataset '{dataset_name}'. "
@@ -171,7 +205,7 @@ def download_dataset(
     print(f"{'='*70}\n")
 
     print(f"Downloading {hub_repo} from Hugging Face Hub …")
-    dataset_dict = load_dataset(hub_repo)
+    dataset_dict = _load_from_hub(hub_repo, splits)
 
     categories, rel_categories = _extract_metadata(hub_repo)
     print(f"  categories     : {len(categories)}")
